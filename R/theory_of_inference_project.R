@@ -1,5 +1,10 @@
 surv <- read.csv("../data/surv.csv")
 
+# Extract data from surv
+times <- surv$times
+init <- surv$init
+fin <- surv$fin
+
 # Function to compute negative log-likelihood 
 neg_log_likelihood <- function(params, likelihood_func, times, init, fin) {
   # Compute the likelihood for the given parameters
@@ -17,8 +22,8 @@ neg_log_likelihood <- function(params, likelihood_func, times, init, fin) {
   return(-log_likelihood)
 }
 
-# model_3's model likelihood function
-model_3_likelihood <- function(params, times, init, fin) {
+# multiplicative_model's model likelihood function
+multiplicative_model_likelihood <- function(params, times, init, fin) {
   # Extract parameters
   theta1 <- params[1]
   theta2 <- params[2]
@@ -41,12 +46,54 @@ model_3_likelihood <- function(params, times, init, fin) {
   return(likelihoods)
 }
 
-# Function to fit model_3's model using maximum likelihood
-fit_model_3_model <- function(surv) {
-  # Extract data from surv
-  times <- surv$times
-  init <- surv$init
-  fin <- surv$fin
+# log-linear model's likelihood function
+log_linear_model_likelihood <- function(params, times, init, fin) {
+  # Extract parameters
+  phi1 <- params[1]
+  phi2 <- params[2]
+  sigma2 <- params[3]  # variance parameter
+  
+  # Ensure parameters are valid
+  if (sigma2 <= 0) {
+    # Return small positive likelihood if parameters are invalid
+    return(rep(1e-10, length(fin)))
+  }
+  
+  # Calculate mean of log(fin) under the model
+  expected_log_fin <- log(init) + phi1 + phi2 * times
+  
+  # Standard deviation in log-scale
+  sd_log_fin <- sqrt(sigma2)
+  
+  # Calculate likelihood using normal distribution on log(fin)
+  likelihoods <- dnorm(log(fin), mean = expected_log_fin, sd = sd_log_fin)
+  
+  return(likelihoods)
+}
+
+optim_wrapper <- function(initial_params, likelihood_func) {
+  # Perform optimisation
+  optim_result <- optim(
+    par = initial_params,
+    fn = neg_log_likelihood,
+    likelihood_func = likelihood_func,
+    times = times,
+    init = init,
+    fin = fin,
+    method = "BFGS",
+    hessian = TRUE,
+    control = list(trace = 1, maxit = 1000)  # Debug/tracing
+  )
+  
+  # Check convergence
+  if (optim_result$convergence != 0) {
+    warning("Optimisation did not converge. Code: ", optim_result$convergence)
+  }
+  
+  return(optim_result)
+}
+# Function to find mle estimates for multiplicative model
+fit_multiplicative_model <- function() {
   
   # Initial parameter guesses
   # (Replace initial_theta1 and initial_theta2 with estimates from Q1 when available)
@@ -66,99 +113,104 @@ fit_model_3_model <- function(surv) {
 
 
   # Minimize negative log-likelihood
-  optim_result <- optim(
-    par = initial_params,
-    fn = neg_log_likelihood,
-    likelihood_func = model_3_likelihood,
-    times = times,
-    init = init,
-    fin = fin,
-    method = "BFGS",
-    hessian = TRUE,
-    control = list(trace = 1, maxit = 1000)  # Add tracing for debugging
-  )
-
-  # Check convergence
-  if (optim_result$convergence != 0) {
-    warning("Optimisation did not converge. Code: ", optim_result$convergence)
-  }
+  optim_result <- optim_wrapper(initial_params, multiplicative_model_likelihood)
 
   return(optim_result)
 }
-
-
-plot_model_3_fit <- function(surv, fit) {
-  # Extract observed data
-  times <- surv$times
-  init <- surv$init
-  fin <- surv$fin
+# Function to find mle estimates for log linear model
+fit_log_linear_model <- function() {
   
-  # Observed relative change
+  # Initial parameter guesses
+  initial_phi1 <- 0.0
+  initial_phi2 <- 0.0
+  
+  # Estimate initial sigma^2 based on a rough fit of the model using initial guesses
+  expected_log_fin <- log(init) + initial_phi1 + initial_phi2 * times
+  residuals <- log(fin) - expected_log_fin
+  initial_sigma2 <- mean(residuals^2)
+  
+  # Bundle into an initial parameter vector
+  initial_params <- c(initial_phi1, initial_phi2, initial_sigma2)
+  
+  # Print initial values for debugging
+  cat("Initial params:", initial_params, "\n")
+  
+  # Minimize negative log-likelihood
+  optim_result <- optim_wrapper(initial_params, log_linear_model_likelihood)
+  
+  return(optim_result)
+}
+
+plot_model_fit <- function(param1, param2, variance_parameter,
+                           model_name = "Model Name") {
+  
+  if (model_name == "Multiplicative Model") {
+      predicted_ratio <- param1 * exp(-param2 * times)
+      sd_ratio <- sqrt(variance_parameter)
+  } else if (model_name == "Log Linear Model") {
+      predicted_ratio <- exp(param1 + param2 * times)
+      sd_ratio <- predicted_ratio * exp(0.5 * variance_parameter) * sqrt(exp(variance_parameter) - 1)
+  } else {
+      stop("Unsupported model type. Please use 'Multiplicative Model' or 'Log Linear Model'.")
+  }
+  
+  
+  # Compute observed ratio
   observed_ratio <- fin / init
   
-  # Extract fitted parameters
-  theta1_hat <- fit$par[1]
-  theta2_hat <- fit$par[2]
-  s2_hat     <- fit$par[3]
-  
-  # Model-predicted relative change
-  # (the expectation of fin/init without the delta_i noise term)
-  predicted_ratio <- theta1_hat * exp(-theta2_hat * times)
-  
-  # Compute the 95% prediction interval in relative space
-  # delta_i ~ N(0, s2_hat) => st. dev of the relative scale is sqrt(s2_hat)
+  # Take sqrt(variance_parameter) as the standard deviation
   ci_multiplier <- 1.96
-  sd_ratio <- sqrt(s2_hat)
-  lower_bound <- predicted_ratio - ci_multiplier * sd_ratio
-  upper_bound <- predicted_ratio + ci_multiplier * sd_ratio
   
-  # Plot
+  # 95% prediction (or confidence) interval
+  ci_upper <- predicted_ratio + ci_multiplier * sd_ratio
+  ci_lower <- predicted_ratio - ci_multiplier * sd_ratio
+  
+  # Plot observed data
   plot(times, observed_ratio,
        pch = 19, col = "blue",
        xlab = "Time (hours)",
        ylab = "Relative Change (fin / init)",
-       main = "Model 3's Fit: Relative Change vs Time")
+       main = paste(model_name, "Fit: Relative Change vs Time"))
   
-  # Sort data by time to ensure a smooth line/polygon
+  
+  # Order data for a smooth fitted line
   ord <- order(times)
   
   # Add fitted curve
   lines(times[ord], predicted_ratio[ord], col = "red", lwd = 2)
   
-  # Add 95% prediction interval band
+  # Add prediction/confidence interval as a shaded area
   polygon(
     x = c(times[ord], rev(times[ord])),
-    y = c(lower_bound[ord], rev(upper_bound[ord])),
-    col = rgb(1, 0, 0, 0.2), border = NA
+    y = c(ci_lower[ord], rev(ci_upper[ord])),
+    col = rgb(1, 0, 0, 0.2),
+    border = NA
   )
   
-  # Legend
+  # Add legend
   legend("topright",
-         legend = c("Observed Ratio", "Fitted Ratio", "95% Prediction Interval"),
+         legend = c("Observed", "Fitted", "95% Interval"),
          col = c("blue", "red", rgb(1, 0, 0, 0.2)),
-         pch = c(19, NA, 15), lty = c(NA, 1, NA), bty = "n")
+         pch = c(19, NA, 15),
+         lty = c(NA, 1, NA),
+         bty = "n")
 }
 
-
-# Function to analyse residuals for Model 3
-analyse_model_3_residuals <- function(surv, fit) {
-  # Extract data and fitted parameters
-  times <- surv$times
-  init <- surv$init
-  fin <- surv$fin
-  
-  theta1_hat <- fit$par[1]
-  theta2_hat <- fit$par[2]
-  s2_hat <- fit$par[3]
-  
-  # Calculate expected final counts
-  expected_fin <- init * theta1_hat * exp(-theta2_hat * times)
-  
-  # Calculate raw residuals
-  raw_residuals <- fin - expected_fin
-  
-  # Calculate standardised residuals - scaled by init to match error structure
-  standardised_residuals <- raw_residuals / (init * sqrt(s2_hat))
+# Function to analyse residuals 
+analyse_residuals <- function(param1, param2, variance_parameter,
+                                                   model_name = "Model Name") {
+  # Calculate standardised residuals
+  if (model_name == "Multiplicative Model") {
+    expected_fin <- init *param1* exp(-param2* times)
+    raw_residuals <- fin - expected_fin
+    standardised_residuals <- raw_residuals / (init * sqrt(variance_parameter))
+  } else if (model_name == "Log Linear Model") {
+    expected_fin <- exp(log(init) + param1 + param2*times)
+    raw_residuals <- log(fin) - log(expected_fin)
+    standardised_residuals <- raw_residuals / sqrt(variance_parameter)
+  } else {
+    stop("Unsupported model type. Please use 'Multiplicative Model' or 'Log Linear Model'.")
+  }
   
   # Create a panel of diagnostic plots
   par(mfrow = c(2, 2))
@@ -203,30 +255,57 @@ analyse_model_3_residuals <- function(surv, fit) {
   ))
 }
 
-# Fit the model
-model_3_fit <- fit_model_3_model(surv)
 
-# analyse residuals
-residual_analysis <- analyse_model_3_residuals(surv, model_3_fit)
+# Fit multiplicative model
+multiplicative_model_fit <- fit_multiplicative_model()
+
+# Print multiplicative model mle estimates: 
+theta1_hat <- multiplicative_model_fit$par[1]
+theta2_hat <- multiplicative_model_fit$par[2]
+s2_hat <- multiplicative_model_fit$par[3]
+cat("theta1_hat: ", theta1_hat, "\n", "theta2_hat: ", theta2_hat, "\n", "s2_hat: ", s2_hat, "\n")
+
+# Fit log linear model
+log_linear_model_fit <- fit_log_linear_model()
+
+# Print log linear model mle estimates: 
+phi1_hat <- log_linear_model_fit$par[1]
+phi2_hat <- log_linear_model_fit$par[2]
+sigma2_hat <- log_linear_model_fit$par[3]
+cat("phi1_hat: ", phi1_hat, "\n", "phi2_hat: ", phi2_hat, "\n", "sigma2_hat: ", sigma2_hat, "\n")
+
 
 # Ensure the save directory exists
 if (!dir.exists("../plots")) {
   dir.create("../plots")
 }
 
-# Create and save plot of the model fit with 95% prediction intervals
-png(filename = "../plots/model_3_fit.png", width = 800, height = 600)
-plot_model_3_fit(surv, model_3_fit)
+# Create and save plot of the multiplicative model fit with 95% prediction intervals
+png(filename = "../plots/multiplicative_model_fit.png", width = 800, height = 600)
+plot_model_fit(theta1_hat, theta2_hat, s2_hat, "Multiplicative Model")
 dev.off()
 
-# Save the plot for residuals analysis
-png(filename = "../plots/model_3_residuals.png", width = 800, height = 800)
-analyse_model_3_residuals(surv, model_3_fit)
+# Save the plot for multiplicative model residuals analysis
+png(filename = "../plots/multiplicative_model_residuals.png", width = 800, height = 800)
+residual_analysis_multiplicative <- analyse_residuals(theta1_hat, theta2_hat, s2_hat, "Multiplicative Model")
 dev.off()
 
 # Print summary statistics for report
-cat("Residual analysis summary:\n")
-cat("Mean of standardised residuals:", residual_analysis$mean_residual, "\n")
-cat("SD of standardised residuals:", residual_analysis$sd_residual, "\n")
+cat("Residual analysis summary (multiplicative):\n")
+cat("Mean of standardised residuals:", residual_analysis_multiplicative$mean_residual, "\n")
+cat("SD of standardised residuals:", residual_analysis_multiplicative$sd_residual, "\n")
 
+# Create and save plot of the log linear model fit with 95% prediction intervals
+png(filename = "../plots/log_linear_model_fit.png", width = 800, height = 600)
+plot_model_fit(phi1_hat, phi2_hat, sigma2_hat, "Log Linear Model")
+dev.off()
 
+# Save the plot for log linear model residuals analysis
+png(filename = "../plots/log_linear_model_residuals.png", width = 800, height = 800)
+residual_analysis_log_linear <- analyse_residuals(phi1_hat, phi2_hat, sigma2_hat, "Log Linear Model")
+dev.off()
+
+# Print summary statistics for report
+cat("Residual analysis summary (log linear):\n")
+cat("Mean of standardised residuals:", residual_analysis_log_linear$mean_residual, "\n")
+cat("SD of standardised residuals:", residual_analysis_log_linear$sd_residual, "\n")
